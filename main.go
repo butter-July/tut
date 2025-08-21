@@ -87,18 +87,7 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		},
 	})
 	history := val.([]openai.ChatCompletionMessage)
-	//text := ""
-	/*message := update.Message
-	imagePath := os.Args[1]
-	imageData, _ := ioutil.ReadFile(imagePath)
-	encodeString := base64.StdEncoding.EncodeToString(imageData)
-	imageString := encodeString
-	if message.Photo != nil {
-		text = imageString
-	} else {
-		text = message.Text
-	}
-	*/
+	
 	var userContent string
 	if update.Message.Photo != nil {
 
