@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"encoding/base64"
-	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -22,11 +24,13 @@ var (
 )
 
 type AuthTransport struct {
-	Base http.RoundTripper
+	Base   http.RoundTripper
+	APIKey string
 }
 
 func (t *AuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(context.Background())
+	req.Header.Set("Authorization", "Bearer "+t.APIKey)
 	return t.Base.RoundTrip(req)
 }
 
@@ -34,28 +38,40 @@ func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Fatalf("Error loading .env file: %v", err)
 	}
+	proxyurl := os.Getenv("PROXY_URL")
+	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	api := os.Getenv("AI_GATEWAY_API_KEY")
+	proxyURL, _ := url.Parse(proxyurl)
+	transport := &http.Transport{
+		Proxy: http.ProxyURL(proxyURL),
+	}
 
-	var (
-		botToken     = os.Getenv("TELEGRAM_BOT_TOKEN")
-		vercelApiKey = os.Getenv("AI_GATEWAY_API_KEY")
-	)
+	authTransport := &AuthTransport{
+		Base:   transport,
+		APIKey: api,
+	}
 
-	clientCfg := openai.DefaultConfig(vercelApiKey)
-	clientCfg.BaseURL = "https://ai-gateway.vercel.sh/v1"
-	aiClient = openai.NewClientWithConfig(clientCfg)
+	httpClient := &http.Client{
+		Transport: authTransport,
+		Timeout:   60 * time.Second,
+	}
+
+	aiClient = openai.NewClientWithConfig(openai.ClientConfig{
+		BaseURL:    "https://ai-gateway.vercel.sh/v1",
+		HTTPClient: httpClient,
+	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
-	tut, err := bot.New(botToken, bot.WithDefaultHandler(handler))
+	b, err := bot.New(botToken, bot.WithDefaultHandler(handler))
 	if err != nil {
 		log.Fatalf("Failed to initialize bot: %v", err)
 	}
 
 	log.Println("Bot started...")
-	tut.Start(ctx)
+	b.Start(ctx)
 }
-
 func toBase64(b []byte) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
@@ -66,12 +82,12 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 
 	val, _ := messages.LoadOrStore(chatID, []openai.ChatCompletionMessage{
 		{
-			Role:    openai.ChatMessageRoleSystem,
+			Role:    "system",
 			Content: "你是Tut，一个精通编程的AI,你可以回答好多好多问题,不止编程相关的，回答字数不超过50",
 		},
 	})
 	history := val.([]openai.ChatCompletionMessage)
-
+	
 	var userContent string
 	if update.Message.Photo != nil {
 
@@ -79,22 +95,13 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 
 		fileID := photo.FileID
 
-		file, err := b.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
-		if err != nil {
-			log.Fatalln(err)
-		}
-		downloadURL := b.FileDownloadLink(file)
-		resp, err := http.Get(downloadURL)
-		if err != nil {
-			log.Fatalln(err)
-		}
+		file, _ := b.GetFile(ctx, &bot.GetFileParams{FileID: fileID})
+		download := b.FileDownloadLink(file)
+		resp, _ := http.Get(download)
 
 		defer resp.Body.Close()
 
-		bytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Fatalln(err)
-		}
+		bytes, _ := ioutil.ReadAll(resp.Body)
 		var base64Encoding string
 		contentType := http.DetectContentType(bytes)
 		switch contentType {
@@ -102,19 +109,15 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 			base64Encoding += "data:image/jpeg;base64,"
 		case "image/png":
 			base64Encoding += "data:image/png;base64,"
-		default:
-			log.Fatalln("contentType unsupported: " + contentType)
 		}
-
 		base64Encoding += toBase64(bytes)
 
 		userContent = base64Encoding
 	} else if update.Message.Text != "" {
 		userContent = update.Message.Text
 	}
-
 	history = append(history, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
+		Role:    "user",
 		Content: userContent,
 	})
 
@@ -123,20 +126,14 @@ func handler(ctx context.Context, b *bot.Bot, update *models.Update) {
 		Messages: history,
 	}
 
-	resp, err := aiClient.CreateChatCompletion(ctx, req)
-	if err != nil {
-		log.Fatalln(err)
-	}
+	resp, _ := aiClient.CreateChatCompletion(ctx, req)
 
 	if len(resp.Choices) > 0 {
 		answer := resp.Choices[0].Message.Content
-		_, err = b.SendMessage(ctx, &bot.SendMessageParams{
+		_, _ = b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: chatID,
 			Text:   answer,
 		})
-		if err != nil {
-			log.Fatalln(err)
-		}
 
 		history = append(history, resp.Choices[0].Message)
 		messages.Store(chatID, history)
